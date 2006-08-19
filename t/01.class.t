@@ -1,4 +1,4 @@
-use Test::More tests => 19;
+use Test::More tests => 23;
 
 my @slot_got = ( );
 
@@ -14,6 +14,7 @@ sub get_got {
 
 sub get_err {
     my $err = $@;
+    # Tidy up error message
     $err =~ s{ \n .* }{}xms;
     $err =~ s{ \s+ at \s+ \S+ \s+ line \s+ \d+ \s* $ }{}xms;
     return $err;
@@ -36,7 +37,10 @@ use Class::Std::Slots;
     sub other_slot {
         my $self = shift;
         main::got_slot('other_slot');
-        $self->other_signal;
+        # Guarded with has_slots just to make sure it doesn't
+        # make a difference. Don't do this in real code if the
+        # signal call is computationally cheap.
+        $self->other_signal if $self->has_slots('other_signal');
     }
 
     sub do_stuff {
@@ -83,12 +87,18 @@ my $ob1b = My::Class::One->new();
 my $ob2  = My::Class::Two->new();
 my $ob2m = My::Class::Two::More->new();
 
+ok( ! $ob1a->has_slots('my_signal'), 'No slots');
+
 # No signal yet
 $ob1a->do_stuff;
 is(get_got, '', 'No slots');
 
 # Connect to a slot in another class
 $ob1a->connect('my_signal', $ob2, 'another_slot');
+
+ok(   $ob1a->has_slots('my_signal'),    'Has slots'     );
+ok( ! $ob1b->has_slots('my_signal'),    'No slots (2)'   );
+ok( ! $ob1a->has_slots('other_signal'), 'No slots (3)'  );
 
 $ob1a->do_stuff;
 is(get_got, 'another_slot', 'One slot');

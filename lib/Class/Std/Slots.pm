@@ -5,17 +5,18 @@ use strict;
 use Carp;
 use Scalar::Util qw(blessed refaddr weaken);
 
-use version; our $VERSION = qv('0.0.1');
+use version; our $VERSION = qv('0.0.2');
 
 my %signal_map  = ( );  # maps id -> signame -> array of connected slots
 my %signal_busy = ( );  # maps id -> signame -> busy flag
-my %patched     = ( );  # classes who's DESTROY we've patched
+my %patched     = ( );  # classes whose DESTROY we've patched
 
 # Subs we export to caller's namespace
 my @exported_subs = qw(
     connect
     disconnect
     signals
+    has_slots
 );
 
 sub _validate_signal_name {
@@ -28,6 +29,12 @@ sub _check_signal_exists {
     my $class    = shift;
     my $sig_name = shift;
     _validate_signal_name($sig_name);
+
+    # OK to call UNIVERSAL::can() here because we do actually want to
+    # know whether a method named after this signal exists rather than
+    # whether this class or one of its superclasses can respond to
+    # a particular message - so we're not interested in any overridden
+    # version of can()
     croak "Signal '$sig_name' undefined"
         unless UNIVERSAL::can($class, $sig_name);
 }
@@ -89,17 +96,33 @@ sub _emit_signal {
     # Remove busy flag
     delete $signal_busy{$src_id}->{$sig_name};
 
+    # Rethrow any error
     die if $@;
-}
-
-sub _connect_usage {
-    croak 'Usage: $source->connect($sig_name, $dst_obj, $dst_method [, { options }])';
 }
 
 sub _destroy {
     my $src_id = shift;
     delete $signal_map{$src_id};
     delete $signal_busy{$src_id};
+}
+
+sub has_slots {
+    my $src_obj     = shift;
+    my $sig_name    = shift;
+
+    croak 'Usage: $obj->has_slots($sig_name)'
+        unless blessed $src_obj &&
+               defined $sig_name;
+
+    _check_signal_exists(ref($src_obj), $sig_name);
+
+    my $src_id   = refaddr($src_obj);
+
+    return exists $signal_map{$src_id}->{$sig_name};
+}
+
+sub _connect_usage {
+    croak 'Usage: $source->connect($sig_name, $dst_obj, $dst_method [, { options }])';
 }
 
 sub connect {
@@ -127,7 +150,9 @@ sub connect {
     my $caller      = ref($src_obj);
 
     # Now badness: we replace the DESTROY that Class::Std dropped into
-    # the caller's namespace with our own.
+    # the caller's namespace with our own. See the note under BUGS AND
+    # LIMITATIONS about this technique for replacing Class::Std's
+    # destructor.
     unless (exists $patched{$caller}) {
         # If there's nothing in the hash for this object we can't have
         # installed our destructor yet - so do it now.
@@ -143,6 +168,7 @@ sub connect {
         *{ $destroy_func } = sub {
             # Destroy our members
             _destroy($src_id);
+
             # Chain the existing destructor
             $current_func->(@_);
         };
@@ -254,7 +280,7 @@ Class::Std::Slots - Provide signals and slots for standard classes.
 
 =head1 VERSION
 
-This document describes Class::Std::Slots version 0.0.1
+This document describes Class::Std::Slots version 0.0.2
 
 =head1 SYNOPSIS
 
@@ -305,13 +331,13 @@ This document describes Class::Std::Slots version 0.0.1
     # Connect to a slot in another class
     $ob1->connect('my_signal', $ob2, 'another_slot');
 
-    # Fires signal
+    # Emits signal
     $ob1->do_stuff;
 
     # Connect an anon sub as well
     $ob1->connect('my_signal', sub { print "I'm anon...\n"; });
 
-    # Fires signal invoking two slots
+    # Emits signal invoking two slots
     $ob1->do_stuff;
 
 =head1 DESCRIPTION
@@ -421,8 +447,10 @@ display - we're using an imaginary GUI toolkit:
     $lovely->do_download();
 
 We didn't have to subclass or modify C<My::Downloader::Lovely> and we didn't have to clutter its
-interface with methods to allow callbacks to be installed. Each signal can be connected to many
-slots simultaneously; perhaps we want some debug to show up on the console too:
+interface with methods to allow callbacks to be installed.
+
+Each signal can be connected to many slots simultaneously; perhaps we want some debug to show
+up on the console too:
 
     use My::Downloader::Lovely;
     use Pretty::ProgressBar;
@@ -453,6 +481,23 @@ used as a slot.
 The signals we refer to here are unrelated to operating system signals. That's why the class is
 called C<Class::Std::Slots> instead of Class::Std::Signals.
 
+=head2 Further reading
+
+Sarah Thompson has produced a generic signals and slots library for C++:
+
+L<http://sigslot.sourceforge.net/>
+
+The accompanying documentation includes an excellent exploration of the benefits of signals and slots.
+
+Qt (C++ again) uses signals and slots extensively. Consult the Qt documentation and in particular
+the section on L<signals and slots|http://doc.trolltech.com/3.3/signalsandslots.html> for more
+information:
+
+L<http://doc.trolltech.com/3.3/signalsandslots.html>
+
+Other UI toolkits including NextStep / Cocoa / GNUStep use mechanisms similar to signals and slots
+in all but name.
+
 =head1 INTERFACE
 
 C<Class::Std::Slots> is designed to be used in conjunction with C<Class::Std>. It I<may> work
@@ -478,12 +523,16 @@ C<use Class::Std::Slots> just after C<use Class::Std>
 
 and add a call to C<signals> to declare any signals your class will emit.
 
-C<Class::Std::Slots> will add three public methods to your class: C<signals>, C<connect> and
-C<disconnect>.
+C<Class::Std::Slots> will add four public methods to your class: C<signals>, C<connect>,
+C<disconnect> and C<has_slots>.
+
+=head2 Methods created automatically
+
+The following subroutines are installed in any class that uses the C<Class::Std::Slots> module.
 
 =over
 
-=item C<signals>
+=item C<signals( signals )>
 
 Declare the list of signals that a class can emit. Multiple calls to C<signals> are allowed
 but each signal should be declared only once. It is an error to redeclare a signal even in
@@ -497,7 +546,7 @@ To emit a signal simply call it:
 Any arguments passed to the signal will be passed to any slots registered with it. Signals
 never have a return value - any return values from slots are silently discarded.
 
-=item C<connect>
+=item C<connect($signame, ...)>
 
 Create a connection between a signal and a slot. Connections are made between objects (i.e.
 class instances) rather than between classes. To connect the signal C<started> to a slot
@@ -526,7 +575,7 @@ expects to be passed a percentage use something like this:
     });
 
 Normally a slot is passed exactly the arguments that were passed to the signal - so when
-C<< $this_obj->some_signal >> has been connected to C<< $that_obj->some_slot >> throwing the
+C<< $this_obj->some_signal >> has been connected to C<< $that_obj->some_slot >> emitting the
 signal like this:
 
     $this_obj->some_signal(1, 2, 'Here we go');
@@ -585,10 +634,10 @@ need to specify the C<strong> option for them.
 
 =back
 
-=item C<disconnect>
+=item C<disconnect($signame, ...)>
 
 Break signal / slot connections. All connections are broken when the signalling
-object is destroyed. To break a connection before then use:
+object is destroyed. To break a connection at any other time use:
 
     $obj->disconnect('a_signal', $other_obj, 'method');
 
@@ -617,6 +666,26 @@ all other slots connected to the same signal:
     $obj->disconnect('a_signal');
 
 If this proves to be an enbearable limitation I'll do something about it.
+
+=item C<has_slots($sig_name)>
+
+In cases where emitting a signal involves costly computation C<has_slots>
+can be called to check whether a signal has any registered slots and if
+not skip both the expensive computation and the signal call.
+
+    if ($self->has_slots('expensive_signal') {
+        my @sig_args = $self->do_expensive_sums();
+        $self->expensive_signal(@sig_args);
+    }
+
+Note that there is no benefit in guarding simple signal calls with a call
+to has_slots:
+
+    # Don't do this
+    $self->cheap_signal() if $self->has_slots('cheap_signal');
+
+    # Instead just do
+    $self->cheap_signal();
 
 =back
 
@@ -650,13 +719,16 @@ unintended loops of mutually triggered signals.
 
 =item C<< Usage: $source->connect($sig_name, $dst_obj, $dst_method [, { options }]) >>
 
-Connect can be called either like this:
+C<connect> can be called either like this:
 
     $my_obj->connect('some_signal', $other_obj, 'slot_to_fire');
 
 or like this:
 
     $my_obj->connect('some_signal', sub { print "Slot fired" });
+
+In either case an anonymous hash containing options may be passed as an
+additional argument.
 
 =item C<< Slot '%s' not handled by %s >>
 
@@ -668,6 +740,11 @@ the target object. Slots are normal member functions.
 Disconnect should be called like this:
 
     # Disconnect one slot
+    $my_obj->disconnect('some_signal', $other_obj, 'slot_name');
+
+or like this:
+
+    # Disconnect all slots in the specified object
     $my_obj->disconnect('some_signal', $other_obj);
 
 or like this:
@@ -708,6 +785,27 @@ None reported.
 =head1 BUGS AND LIMITATIONS
 
 No bugs have been reported.
+
+Connecting the same slot to a signal multiple times actually makes multiple
+connections and therefore invokes the slot as many times as it was registered
+when the signal is emitted. Arguably only one connection to each slot should
+be allowed. Let me know.
+
+There is currently no way to disconnect an anonymous sub slot without also
+disconnecting other slots from the same signal.
+
+C<Class::Std::Slots> replaces the DESTROY sub injected into the caller's
+namespace by C<Class::Std> and arranges to call the original destructor
+after doing its own cleanup. This may interact badly with other modules that
+also replace the C<Class::Std> destructor - although it is designed to ensure
+it always calls whatever destructor it finds. Suggestions for a neater way
+of chaining our destructor gratefully received.
+
+I'm not sure that the code that prevents signals from re-entering (i.e. it's
+an error to emit a signal if that signal is already being handled) might not
+prevent some (fairly complex) techniques. If this proves to be a limitation
+in practice it would be possible to add an option to each connection that
+would allow that connection to be re-entrant.
 
 Please report any bugs or feature requests to
 C<bug-class-std-slots@rt.cpan.org>, or through the web interface at
