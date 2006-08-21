@@ -5,7 +5,7 @@ use strict;
 use Carp;
 use Scalar::Util qw(blessed refaddr weaken);
 
-use version; our $VERSION = qv('0.0.2');
+use version; our $VERSION = qv('0.0.3');
 
 my %signal_map  = ( );  # maps id -> signame -> array of connected slots
 my %signal_busy = ( );  # maps id -> signame -> busy flag
@@ -17,26 +17,51 @@ my @exported_subs = qw(
     disconnect
     signals
     has_slots
+    emit_signal
 );
 
-sub _validate_signal_name {
-    my $sig_name = shift;
-    croak "Invalid signal name '$sig_name'"
-        unless $sig_name =~ /^\w(?:[\w\d])*$/;
+sub _massage_signal_names {
+    my $sig_names = shift;
+
+    croak "Missing signal name"
+        unless defined($sig_names);
+
+    $sig_names = [ $sig_names ]
+        unless ref($sig_names);
+        
+    croak "Signal name must be a scalar or an array reference"
+        unless ref($sig_names) eq 'ARRAY';
+
+    for my $sig_name (@{$sig_names}) {
+        croak "Invalid signal name '$sig_name'"
+            unless $sig_name =~ /^\w(?:[\w\d])*$/;
+    }
+    
+    return $sig_names;
 }
 
-sub _check_signal_exists {
-    my $class    = shift;
-    my $sig_name = shift;
-    _validate_signal_name($sig_name);
+sub _check_signals_exist {
+    my $class     = shift;
+    my $sig_names = shift;
 
-    # OK to call UNIVERSAL::can() here because we do actually want to
-    # know whether a method named after this signal exists rather than
-    # whether this class or one of its superclasses can respond to
-    # a particular message - so we're not interested in any overridden
-    # version of can()
-    croak "Signal '$sig_name' undefined"
-        unless UNIVERSAL::can($class, $sig_name);
+    for my $sig_name (@{$sig_names}) {
+        # OK to call UNIVERSAL::can() here because we do actually want to
+        # know whether a method named after this signal exists rather than
+        # whether this class or one of its superclasses can respond to
+        # a particular message - so we're not interested in any overridden
+        # version of can()
+        croak "Signal '$sig_name' undefined"
+            unless UNIVERSAL::can($class, $sig_name);
+    }
+}
+
+sub emit_signal {
+    my $self        = shift;
+    my $sig_names   = _massage_signal_names(shift);
+
+    for my $sig_name (@{$sig_names}) {
+        _emit_signal($self, $sig_name, @_);
+    }
 }
 
 sub _emit_signal {
@@ -108,17 +133,17 @@ sub _destroy {
 
 sub has_slots {
     my $src_obj     = shift;
-    my $sig_name    = shift;
+    my $sig_names   = _massage_signal_names(shift);
 
     croak 'Usage: $obj->has_slots($sig_name)'
-        unless blessed $src_obj &&
-               defined $sig_name;
+        unless blessed $src_obj;
 
-    _check_signal_exists(ref($src_obj), $sig_name);
+    for my $sig_name (@{$sig_names}) {
+        my $src_id = refaddr($src_obj);
+        return 1 if exists $signal_map{$src_id}->{$sig_name};
+    }
 
-    my $src_id   = refaddr($src_obj);
-
-    return exists $signal_map{$src_id}->{$sig_name};
+    return;
 }
 
 sub _connect_usage {
@@ -127,14 +152,12 @@ sub _connect_usage {
 
 sub connect {
     my $src_obj     = shift;
-    my $sig_name    = shift;
+    my $sig_names   = _massage_signal_names(shift);
     my $dst_obj     = shift;
     my $dst_method;
 
     _connect_usage() unless blessed($src_obj) &&
                             defined($dst_obj);
-
-    _check_signal_exists(ref($src_obj), $sig_name);
 
     if (blessed($dst_obj)) {
         $dst_method = shift || _connect_usage();
@@ -148,6 +171,20 @@ sub connect {
     my $options     = shift || { };
     my $src_id      = refaddr($src_obj);
     my $caller      = ref($src_obj);
+
+    weaken($dst_obj) 
+        unless $options->{strong} 
+                || ref($dst_obj) eq 'CODE';
+
+    _check_signals_exist($caller, $sig_names)
+        unless $options->{undeclared};
+
+    for my $sig_name (@{$sig_names}) {
+        # Stash the object and method so we can call it later.
+        push @{$signal_map{$src_id}->{$sig_name}}, [
+            $dst_obj, $dst_method, $options
+        ];
+    }
 
     # Now badness: we replace the DESTROY that Class::Std dropped into
     # the caller's namespace with our own. See the note under BUGS AND
@@ -177,12 +214,6 @@ sub connect {
         $patched{$caller}++;
     }
 
-    # Stash the object and method so we can call it later.
-    weaken($dst_obj) unless $options->{strong} || ref($dst_obj) eq 'CODE';
-    push @{$signal_map{$src_id}->{$sig_name}}, [
-        $dst_obj, $dst_method, $options
-    ];
-
     return;
 }
 
@@ -194,29 +225,31 @@ sub disconnect {
         unless blessed $src_obj;
 
     if (@_) {
-        my $sig_name = shift;
-        _check_signal_exists(ref($src_obj), $sig_name);
-        if (@_) {
-            my $dst_obj     = shift;
-            my $dst_method  = shift;    # optional - undef is ok in the grep below
-            my $dst_id      = refaddr($dst_obj);
+        my $sig_names   = _massage_signal_names(shift);
+        my $dst_obj     = shift;    # optional
+        my $dst_method  = shift;    # optional - undef is ok in the grep below
+        my $dst_id      = refaddr($dst_obj);
 
+        for my $sig_name (@{$sig_names}) {
             my $slots = $signal_map{$src_id}->{$sig_name};
-            if (defined $slots) {
-                # Nasty block to filter out matching connections.
-                @{$slots} = grep {
-                    defined $_
-                      && defined $_->[0]
-                      && ($dst_id != refaddr($_->[0])
-                          || (! (defined($dst_method)
-                                   && defined($_->[1])
-                                   && ($dst_method eq $_->[1]))) )
-                } @{$slots};
+
+            if (defined($dst_obj)) {
+                if (defined $slots) {
+                    # Nasty block to filter out matching connections.
+                    @{$slots} = grep {
+                        defined $_
+                          && defined $_->[0]
+                          && ($dst_id != refaddr($_->[0])
+                              || (! (defined($dst_method)
+                                       && defined($_->[1])
+                                       && ($dst_method eq $_->[1]))) )
+                    } @{$slots};
+                }
             }
-        }
-        else {
-            # Delete all connections for given signal
-            delete $signal_map{$src_id}->{$sig_name};
+            else {
+                # Delete all connections for given signal
+                delete $signal_map{$src_id}->{$sig_name};
+            }
         }
     }
     else {
@@ -227,11 +260,9 @@ sub disconnect {
 
 sub signals {
     my $caller = caller;
+    my $sig_names = _massage_signal_names(\@_);
 
-    for my $sig_name (@_) {
-        # Name OK?
-        _validate_signal_name($sig_name);
-
+    for my $sig_name (@{$sig_names}) {
         croak "Signal '$sig_name' already declared"
             if UNIVERSAL::can($caller, $sig_name);
 
@@ -280,7 +311,7 @@ Class::Std::Slots - Provide signals and slots for standard classes.
 
 =head1 VERSION
 
-This document describes Class::Std::Slots version 0.0.2
+This document describes Class::Std::Slots version 0.0.3
 
 =head1 SYNOPSIS
 
@@ -490,8 +521,7 @@ L<http://sigslot.sourceforge.net/>
 The accompanying documentation includes an excellent exploration of the benefits of signals and slots.
 
 Qt (C++ again) uses signals and slots extensively. Consult the Qt documentation and in particular
-the section on L<signals and slots|http://doc.trolltech.com/3.3/signalsandslots.html> for more
-information:
+the section on signals and slots for more information:
 
 L<http://doc.trolltech.com/3.3/signalsandslots.html>
 
@@ -523,8 +553,8 @@ C<use Class::Std::Slots> just after C<use Class::Std>
 
 and add a call to C<signals> to declare any signals your class will emit.
 
-C<Class::Std::Slots> will add four public methods to your class: C<signals>, C<connect>,
-C<disconnect> and C<has_slots>.
+C<Class::Std::Slots> will add five public methods to your class: C<signals>, C<connect>,
+C<disconnect>, C<has_slots> and C<emit_signal>.
 
 =head2 Methods created automatically
 
@@ -546,7 +576,7 @@ To emit a signal simply call it:
 Any arguments passed to the signal will be passed to any slots registered with it. Signals
 never have a return value - any return values from slots are silently discarded.
 
-=item C<connect($signame, ...)>
+=item C<connect($sig_name, ...)>
 
 Create a connection between a signal and a slot. Connections are made between objects (i.e.
 class instances) rather than between classes. To connect the signal C<started> to a slot
@@ -573,6 +603,11 @@ expects to be passed a percentage use something like this:
         my $percent = int($pos * 100 / $all);
         $uitools->show_progress($percent);
     });
+
+A slot may be connected to multiple signals at the same time by passing an array reference
+in place of the signal name:
+
+    $my_thing->connect(['debug_out', 'warning_out'], $logger, 'trace');
 
 Normally a slot is passed exactly the arguments that were passed to the signal - so when
 C<< $this_obj->some_signal >> has been connected to C<< $that_obj->some_slot >> emitting the
@@ -632,9 +667,17 @@ references to it need be kept.
 Anonymous subroutine slots are always strongly referred to - so there is no
 need to specify the C<strong> option for them.
 
+=item undeclared
+
+Allow a connection to be made to an undefined signal. It is possible for an object
+to emit arbitrary signals by calling C<emit_signal>. Normally C<connect> checks that
+a signal has been declared before connecting to it (bugs caused by slightly misnamed
+signals are particularly frustrating). This flag overrides that check and makes it
+your responsibility to get the signal name right.
+
 =back
 
-=item C<disconnect($signame, ...)>
+=item C<disconnect($sig_name, ...)>
 
 Break signal / slot connections. All connections are broken when the signalling
 object is destroyed. To break a connection at any other time use:
@@ -656,6 +699,10 @@ And finally to break all connections from a signalling object:
 In other words each additional argument increases the specificity of the connections
 that are targetted.
 
+As with connect a reference to an array of signal names may be passed:
+
+    $obj->disconnect(['sig1', 'sig2', 'sig3'], $my_slotz);
+
 Note that it is not possible to disconnect an anonymous slot subroutine without disconnecting
 all other slots connected to the same signal:
 
@@ -667,10 +714,28 @@ all other slots connected to the same signal:
 
 If this proves to be an enbearable limitation I'll do something about it.
 
+=item C<emit_signal($sig_name, ...)>
+
+It's not always possible to pre-declare all the signals an object may emit. For example an XML
+processor may emit signals corresponding to the names of tags in the parsed XML; in that case
+it would be overly restrictive to require pre-declaration of the signals.
+
+To emit an arbitrary signal - which may or may not have been declared - call emit() directly
+like this:
+
+    $self->emit_signal('made_up_signal', @sig_args);
+
+Pass C<connect> the C<undeclared> option to connect to an undeclared signal.
+
+Multiple signals may be emitted at the same time (or rather one after another) by passing a
+reference to an array of signal names:
+
+    $self->emit_signal(['sig1', 'sig2'], @sig_args);
+    
 =item C<has_slots($sig_name)>
 
 In cases where emitting a signal involves costly computation C<has_slots>
-can be called to check whether a signal has any registered slots and if
+can be called to check whether a signal has any connected slots and if
 not skip both the expensive computation and the signal call.
 
     if ($self->has_slots('expensive_signal') {
@@ -687,6 +752,10 @@ to has_slots:
     # Instead just do
     $self->cheap_signal();
 
+As usual a reference to an array of signal names may be passed in which
+case C<has_slots> will return a true value if any of the named signals
+has connected slots.
+
 =back
 
 =head1 DIAGNOSTICS
@@ -697,6 +766,18 @@ to has_slots:
 
 Signal names have the same syntax as identifier names - you've tried to
 use a name that contains a character that isn't legal in an identifier.
+
+=item C<< Signal name must be a scalar or an array reference >>
+
+Either pass a single signal name like this:
+
+    $obj->has_slots('sig1');
+
+Or pass a reference to an array of signal names like this:
+
+    $obj->has_slots(['sig1', 'sig2', 'sig3']);
+
+This applies to all methods that accept a signal name.
 
 =item C<< Signal '%s' undefined >>
 
@@ -776,11 +857,12 @@ Class::Std::Slots requires no configuration files or environment variables.
 
 =head1 DEPENDENCIES
 
-Class::Std
+C<Class::Std>
 
 =head1 INCOMPATIBILITIES
 
-None reported.
+Only known to work in conjuction with C<Class::Std>. Only tested when used
+with C<Class::Std> in the way shown in this document.
 
 =head1 BUGS AND LIMITATIONS
 

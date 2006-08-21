@@ -1,6 +1,10 @@
-use Test::More tests => 23;
+use Test::More tests => 27;
+
+# TODO: More tests for disconnection syntax. Make sure the correct things
+# always get disconnected. More tests for arrays of signal names.
 
 my @slot_got = ( );
+my $rc;
 
 sub got_slot {
     push @slot_got, @_;
@@ -99,6 +103,7 @@ $ob1a->connect('my_signal', $ob2, 'another_slot');
 ok(   $ob1a->has_slots('my_signal'),    'Has slots'     );
 ok( ! $ob1b->has_slots('my_signal'),    'No slots (2)'   );
 ok( ! $ob1a->has_slots('other_signal'), 'No slots (3)'  );
+ok(   $ob1a->has_slots(['other_signal', 'my_signal']), 'Has multiple slots' );
 
 $ob1a->do_stuff;
 is(get_got, 'another_slot', 'One slot');
@@ -123,7 +128,7 @@ $ob1a->do_stuff;
 is(get_got, '', 'Deleted everything');
 
 # More complex connections
-$ob1a->connect('my_signal', $ob1b, 'my_signal');
+$ob1a->connect(['my_signal'], $ob1b, 'my_signal');
 $ob1b->connect('my_signal', $ob2m, 'more_slot');
 
 $ob1a->my_signal;       # Fire directly
@@ -180,10 +185,9 @@ eval {
 is(get_err, "Attempt to re-enter signal 'unique_to_more'", 'Simple circularity');
 is(get_got, 'more_slot', 'Simple circularity results');
 
-$ob1a->disconnect();
-$ob1b->disconnect();
-$ob2->disconnect();
-$ob2m->disconnect();
+for ($ob1a, $ob1b, $ob2, $ob2m) {
+    $_->disconnect();
+}
 
 # Trigger all the signals...
 for ($ob1a, $ob1b) {
@@ -209,3 +213,21 @@ eval {
 
 is(get_err, "Attempt to re-enter signal 'my_signal'", 'Complex circularity');
 is(get_got, 'another_slot more_slot other_slot', 'Complex circularity results');
+
+# Check that has_slots can be called on an undeclared signals
+
+eval {
+    $rc = $ob1a->has_slots('made_up_signal_name');
+};
+
+ok( ! $rc, 'has_slots with made up signal name');
+is(get_err, '', 'has_slots with made up signal name - not an error');
+
+for ($ob1a, $ob1b, $ob2, $ob2m) {
+    $_->disconnect();
+}
+
+$ob1a->connect('made_up_signal_name', $ob1b, 'other_slot', { undeclared => 1 });
+$ob1a->emit_signal('made_up_signal_name');
+
+is(get_got, 'other_slot', 'Synthetic signal name');
