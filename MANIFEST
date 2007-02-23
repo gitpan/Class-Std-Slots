@@ -1,11 +1,13 @@
 Build.PL
 Changes
-MANIFEST
-META.yml # Will be created by "make dist"
-Makefile.PL
-README
 lib/Class/Std/Slots.pm
+Makefile.PL
+MANIFEST
+README
 t/00.load.t
 t/01.class.t
 t/pod-coverage.t
 t/pod.t
+TODO
+META.yml                                 Module meta-data (added by MakeMaker)
+SIGNATURE                                Public-key signature (added by MakeMaker)
