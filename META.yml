@@ -1,9 +1,9 @@
 --- #YAML:1.0
 name:                Class-Std-Slots
-version:             v0.0.4
+version:             v0.1
 abstract:            Provide signals and slots for standard classes.
 license:             perl
-generated_by:        ExtUtils::MakeMaker version 6.32
+generated_by:        ExtUtils::MakeMaker version 6.36
 distribution_type:   module
 requires:     
     Class::Std:                    0
