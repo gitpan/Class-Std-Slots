@@ -1,15 +1,21 @@
---- #YAML:1.0
-name:                Class-Std-Slots
-version:             0.2
-abstract:            Provide signals and slots for standard classes.
-license:             perl
-generated_by:        ExtUtils::MakeMaker version 6.36
-distribution_type:   module
-requires:     
-    Class::Std:                    0
-    Test::More:                    0
-meta-spec:
-    url:     http://module-build.sourceforge.net/META-spec-v1.2.html
-    version: 1.2
+---
+name: Class-Std-Slots
+version: 0.3
 author:
-    - Andy Armstrong <andy@hexten.net>
+  - 'Andy Armstrong <andy@hexten.net>'
+abstract: Provide signals and slots for standard classes.
+license: perl
+resources:
+  license: ~
+requires:
+  Class::Std: 0
+  Test::More: 0
+  version: 0
+provides:
+  Class::Std::Slots:
+    file: lib/Class/Std/Slots.pm
+    version: 0.3
+generated_by: Module::Build version 0.31012
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.2.html
+  version: 1.2
